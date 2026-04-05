@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import bisect
 
-from core.model import WHOLE_NOTE_UNITS, ButtonEvent, LaserNode, MeasureHoldEvent, MeasureLaserSegment, Signature, TimePoint, VoxChart
+from core.model import ButtonEvent, LaserNode, MeasureHoldEvent, MeasureLaserSegment, Signature, TimePoint, VoxChart
 
 
 class ChartMetrics:
     def __init__(self, chart: VoxChart):
         self.chart = chart
+        self._resolution = chart.beat_resolution
         self._signature_cache: dict[int, Signature] = {}
         self._measure_start_cache: dict[int, float] = {1: 0.0}
         self._measure_duration_cache: dict[int, float] = {}
@@ -21,11 +22,11 @@ class ChartMetrics:
             for event in chart.bpms:
                 self._bpm_units.append(self.chart_units(event.time))
                 self._bpm_values.append(event.bpm)
-                self._bpm_beat_units.append(WHOLE_NOTE_UNITS / event.division)
+                self._bpm_beat_units.append(self._resolution * 4 / event.division)
         else:
             self._bpm_units.append(0.0)
             self._bpm_values.append(120.0)
-            self._bpm_beat_units.append(WHOLE_NOTE_UNITS / 4)
+            self._bpm_beat_units.append(float(self._resolution))
 
     def signature_for_measure(self, measure: int) -> Signature:
         if measure in self._signature_cache:
@@ -38,7 +39,7 @@ class ChartMetrics:
 
     def local_units(self, time: TimePoint) -> float:
         signature = self.signature_for_measure(time.measure)
-        return ((time.beat - 1) * signature.beat_units) + time.offset
+        return ((time.beat - 1) * signature.beat_units(self._resolution)) + time.offset
 
     def measure_fraction(self, time: TimePoint) -> float:
         return self.units_to_time_fraction(time.measure, self.local_units(time))
@@ -49,7 +50,7 @@ class ChartMetrics:
 
         total = 0.0
         for current_measure in range(1, measure):
-            total += self.signature_for_measure(current_measure).measure_units
+            total += self.signature_for_measure(current_measure).measure_units(self._resolution)
 
         self._measure_start_cache[measure] = total
         return total
@@ -66,7 +67,7 @@ class ChartMetrics:
             return self._measure_time_segments_cache[measure]
 
         m_start = self.measure_start_units(measure)
-        m_end = m_start + self.signature_for_measure(measure).measure_units
+        m_end = m_start + self.signature_for_measure(measure).measure_units(self._resolution)
 
         # Find all BPM change points within [m_start, m_end)
         lo = bisect.bisect_right(self._bpm_units, m_start) - 1
@@ -117,7 +118,7 @@ class ChartMetrics:
     def beat_time_fractions(self, measure: int) -> list[float]:
         signature = self.signature_for_measure(measure)
         return [
-            self.units_to_time_fraction(measure, beat * signature.beat_units)
+            self.units_to_time_fraction(measure, beat * signature.beat_units(self._resolution))
             for beat in range(signature.beat)
         ]
 
@@ -129,7 +130,7 @@ class ChartMetrics:
 
         while True:
             signature = self.signature_for_measure(current_measure)
-            measure_units = signature.measure_units
+            measure_units = signature.measure_units(self._resolution)
             start_fraction = self.units_to_time_fraction(current_measure, current_units)
 
             if remaining <= 0:
@@ -200,7 +201,7 @@ class ChartMetrics:
 
             for measure in range(start_measure, end_measure + 1):
                 measure_start_units = self.measure_start_units(measure)
-                measure_end_units = measure_start_units + self.signature_for_measure(measure).measure_units
+                measure_end_units = measure_start_units + self.signature_for_measure(measure).measure_units(self._resolution)
                 segment_start_units = max(start_units, measure_start_units)
                 segment_end_units = min(end_units, measure_end_units)
 

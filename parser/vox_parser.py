@@ -9,6 +9,7 @@ from core.tracks import TRACK_IDS, is_laser_track
 class VoxParser:
     SECTION_NAMES = {
         "FORMAT VERSION",
+        "BEAT RESOLUTION",
         "BEAT INFO",
         "BPM INFO",
         "END POSITION",
@@ -84,6 +85,13 @@ class VoxParser:
             if current_section == "FORMAT VERSION":
                 try:
                     chart.version = int(line)
+                except ValueError:
+                    pass
+                continue
+
+            if current_section == "BEAT RESOLUTION":
+                try:
+                    chart.beat_resolution = int(line)
                 except ValueError:
                     pass
                 continue

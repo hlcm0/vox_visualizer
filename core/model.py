@@ -5,7 +5,7 @@ from pathlib import Path
 
 from core.tracks import LASER_TRACKS
 
-WHOLE_NOTE_UNITS = 192
+DEFAULT_BEAT_RESOLUTION = 48
 
 
 @dataclass(frozen=True)
@@ -25,13 +25,11 @@ class Signature:
     beat: int = 4
     note: int = 4
 
-    @property
-    def beat_units(self) -> float:
-        return WHOLE_NOTE_UNITS / self.note
+    def beat_units(self, beat_resolution: int = DEFAULT_BEAT_RESOLUTION) -> float:
+        return beat_resolution * 4 / self.note
 
-    @property
-    def measure_units(self) -> float:
-        return self.beat * self.beat_units
+    def measure_units(self, beat_resolution: int = DEFAULT_BEAT_RESOLUTION) -> float:
+        return self.beat * self.beat_units(beat_resolution)
 
 
 @dataclass(frozen=True)
@@ -87,6 +85,7 @@ class LaserNode:
 class VoxChart:
     source_path: Path | None = None
     version: int = 10
+    beat_resolution: int = DEFAULT_BEAT_RESOLUTION
     end_position: TimePoint = field(default_factory=lambda: TimePoint(1, 1, 0))
     signatures: dict[int, Signature] = field(default_factory=lambda: {1: Signature(4, 4)})
     bpms: list[BpmEvent] = field(default_factory=list)

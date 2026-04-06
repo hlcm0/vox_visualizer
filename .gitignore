@@ -217,3 +217,14 @@ __marimo__/
 
 # conda environments
 .conda/
+
+# C build artifacts
+src/*.o
+vox_visualizer
+vox_vis_debug
+vox_vis_asan
+
+# Comparison/test images (not meant for the repo)
+example/comparison.png
+example/c_output.png
+example/compare_crops.png

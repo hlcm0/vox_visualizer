@@ -35,7 +35,7 @@ class VoxParser:
             except ValueError:
                 return default
 
-    # before version 11 (assumed), laser positions are from 0 to 127 (right->left)
+    # before version 11 (assumed), laser positions are from 0 to 127 (left->right)
     # from version 11, laser positions are from 0.0 to 1.0 (left->right)
     @staticmethod
     def _parse_laser_position(value: str, version: int) -> float:
@@ -47,14 +47,7 @@ class VoxParser:
         if version >= 11:
             return max(0.0, min(1.0, parsed))
 
-        return 1.0 - max(0.0, min(1.0, parsed / 127.0))
-
-    # before version 11 (assumed), track order is flipped
-    @staticmethod
-    def _canonical_track_id(raw_track_id: int, version: int) -> int:
-        if version >= 11:
-            return raw_track_id
-        return 9 - raw_track_id
+        return max(0.0, min(1.0, parsed / 127.0))
 
     @classmethod
     def parse(cls, path: Path) -> VoxChart:
@@ -128,8 +121,7 @@ class VoxParser:
             if current_section not in cls.TRACK_SECTIONS:
                 continue
 
-            raw_track_id = int(current_section.replace("TRACK", ""))
-            track_id = cls._canonical_track_id(raw_track_id, chart.version)
+            track_id = int(current_section.replace("TRACK", ""))
             parts = [part.strip() for part in line.split("\t")]
             if is_laser_track(track_id):
                 if len(parts) < 6:

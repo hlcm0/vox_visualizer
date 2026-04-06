@@ -14,6 +14,14 @@ OBJS    = $(SRCS:.c=.o)
 
 INCLUDES = -I$(SRCDIR) -Ivendor
 
+# Auto-detect libpng for faster PNG output (optional but recommended)
+LIBPNG_CFLAGS := $(shell pkg-config --cflags libpng 2>/dev/null || echo "")
+LIBPNG_LIBS   := $(shell pkg-config --libs   libpng 2>/dev/null || echo "")
+ifneq ($(LIBPNG_LIBS),)
+    CFLAGS  += -DHAVE_LIBPNG $(LIBPNG_CFLAGS)
+    LDFLAGS += $(LIBPNG_LIBS)
+endif
+
 .PHONY: all clean
 
 all: $(TARGET)

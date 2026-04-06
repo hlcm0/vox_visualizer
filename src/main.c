@@ -10,8 +10,14 @@
 #  include <getopt.h>
 #endif
 
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#include "../vendor/stb_image_write.h"
+/* Use libpng for fast, high-quality PNG output when available;
+ * fall back to stb_image_write otherwise. */
+#ifdef HAVE_LIBPNG
+#  include <png.h>
+#else
+#  define STB_IMAGE_WRITE_IMPLEMENTATION
+#  include "../vendor/stb_image_write.h"
+#endif
 
 #include "model.h"
 #include "parser.h"
@@ -165,6 +171,50 @@ int main(int argc, char **argv) {
 
     /* Write PNG */
     ensure_parent_dir(output_path);
+
+#ifdef HAVE_LIBPNG
+    /* libpng path: fast, high-quality compression */
+    {
+        int ok = 0;
+        FILE *fp = fopen(output_path, "wb");
+        if (!fp) {
+            fprintf(stderr, "Error: cannot open '%s' for writing: %s\n",
+                    output_path, strerror(errno));
+            imgbuf_free(&result);
+            renderer_free(rend);
+            goto cleanup;
+        }
+        png_structp png = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+        png_infop info = png ? png_create_info_struct(png) : NULL;
+        if (png && info && !setjmp(png_jmpbuf(png))) {
+            png_init_io(png, fp);
+            png_set_IHDR(png, info,
+                         (png_uint_32)result.width, (png_uint_32)result.height,
+                         8, PNG_COLOR_TYPE_RGBA,
+                         PNG_INTERLACE_NONE,
+                         PNG_COMPRESSION_TYPE_DEFAULT,
+                         PNG_FILTER_TYPE_DEFAULT);
+            /* Level 1 is much faster than the default (6) for large images */
+            png_set_compression_level(png, 1);
+            png_write_info(png, info);
+            for (int y = 0; y < result.height; y++) {
+                png_write_row(png, result.data + y * result.width * 4);
+            }
+            png_write_end(png, NULL);
+            ok = 1;
+        }
+        if (png) png_destroy_write_struct(&png, &info);
+        fclose(fp);
+        if (!ok) {
+            fprintf(stderr, "Error: failed to write PNG to '%s'\n", output_path);
+            imgbuf_free(&result);
+            renderer_free(rend);
+            goto cleanup;
+        }
+    }
+#else
+    /* stb_image_write fallback */
+    stbi_write_png_compression_level = 1;
     if (!stbi_write_png(output_path, result.width, result.height, 4,
                         result.data, result.width * 4)) {
         fprintf(stderr, "Error: failed to write PNG to '%s'\n", output_path);
@@ -172,6 +222,7 @@ int main(int argc, char **argv) {
         renderer_free(rend);
         goto cleanup;
     }
+#endif
     imgbuf_free(&result);
 
     printf("%s\n", output_path);

@@ -80,7 +80,11 @@ content (lanes, notes, lasers, grid lines) is rendered normally.
 
 - C99 compiler (gcc, clang, etc.)
 - `libm` (standard on Linux/macOS)
-- `vendor/stb_image_write.h` and `vendor/stb_truetype.h` (included, public domain)
+- `libpng` (optional but recommended for ~2× faster PNG writing; auto-detected at build time via `pkg-config`)
+  - Debian/Ubuntu: `sudo apt-get install libpng-dev`
+  - Fedora: `sudo dnf install libpng-devel`
+  - macOS: `brew install libpng`
+- `vendor/stb_image_write.h` and `vendor/stb_truetype.h` (included, public domain; used as PNG fallback and for font rendering)
 
 ---
 

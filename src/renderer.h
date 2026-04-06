@@ -44,6 +44,9 @@ typedef struct {
     ChartMetrics   *metrics;
     EventIndex      idx;
     FontCtx        *font;    /* may be NULL */
+    /* Pre-allocated layer buffers (reused across measures) */
+    ImgBuf layer_buf[7];     /* bg, fx_long, bt_long, fx_chip, bt_chip, laser_l, laser_r */
+    int    layer_alloc_h;    /* height for which layers are allocated */
 } Renderer;
 
 int  renderer_init(Renderer *r, const VoxChart *chart, ChartMetrics *metrics,

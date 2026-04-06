@@ -17,18 +17,17 @@ static int lane_height_for_measure(ChartMetrics *m, int measure) {
     return h < 20 ? 20 : h;
 }
 
-/* BT column x bounds: 4 columns, returns (x_left, x_right) pairs */
+/* BT column x bounds: 4 columns, returns (x_left, x_right) pairs.
+ * The 4th column uses 'right' directly to avoid accumulated rounding error. */
 static void compute_bt_columns(int bt[4][2]) {
     int left  = MARGIN + LANE_WIDTH / 2;         /* 60 */
     int right = MARGIN + 3 * LANE_WIDTH / 2;     /* 140 */
     int total_w = right - left;                  /* 80 */
     int bt_w    = total_w / 4;                   /* 20 */
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 4; i++) {
         bt[i][0] = left + i * bt_w;
-        bt[i][1] = left + (i+1) * bt_w;
+        bt[i][1] = (i == 3) ? right : left + (i+1) * bt_w;
     }
-    bt[3][0] = left + 3 * bt_w;
-    bt[3][1] = right;
 }
 
 static void track_lane_bounds(int track, int bt[4][2], int *out_left, int *out_right) {
@@ -117,7 +116,9 @@ static void draw_background(ImgBuf *buf, int img_h,
     for (int i = 0; i < n_beats; i++) {
         float y_music = frac_to_y(top, bottom, beat_fracs[i]);
         float y_img   = sy(y_music, img_h);
-        int lw = (i == 0) ? (SUB_GRID_WIDTH / 2 > 0 ? SUB_GRID_WIDTH / 2 : 1) : SUB_GRID_WIDTH;
+        /* Step 0 (measure start) uses half width as in the Python renderer */
+        int lw = (i == 0) ? (SUB_GRID_WIDTH / 2) : SUB_GRID_WIDTH;
+        if (lw < 1) lw = 1;
         draw_hline(buf, (float)left, (float)right, y_img, sub_g, lw);
     }
 
@@ -593,6 +594,7 @@ int renderer_init(Renderer *r, const VoxChart *chart, ChartMetrics *metrics, Fon
 
 void renderer_free(Renderer *r) {
     event_index_free(&r->idx);
+    for (int i = 0; i < 7; i++) imgbuf_free(&r->layer_buf[i]);
 }
 
 void renderer_measure_size(Renderer *r, int measure, int *out_w, int *out_h) {
@@ -612,17 +614,39 @@ ImgBuf renderer_render_measure(Renderer *r, int measure) {
     int bt[4][2];
     compute_bt_columns(bt);
 
-    /* Allocate layer buffers */
-    ImgBuf bg       = imgbuf_alloc(w, h);
-    ImgBuf fx_long  = imgbuf_alloc(w, h);
-    ImgBuf bt_long  = imgbuf_alloc(w, h);
-    ImgBuf fx_chip  = imgbuf_alloc(w, h);
-    ImgBuf bt_chip  = imgbuf_alloc(w, h);
-    ImgBuf laser_l  = imgbuf_alloc(w, h);
-    ImgBuf laser_r  = imgbuf_alloc(w, h);
+    /* Ensure layer buffers are large enough (grow-only, reuse across measures) */
+    if (h > r->layer_alloc_h) {
+        for (int i = 0; i < 7; i++) {
+            imgbuf_free(&r->layer_buf[i]);
+            r->layer_buf[i] = imgbuf_alloc(w, h);
+        }
+        r->layer_alloc_h = h;
+    }
+
+    /* Aliases for readability */
+    ImgBuf *bg      = &r->layer_buf[0];
+    ImgBuf *fx_long = &r->layer_buf[1];
+    ImgBuf *bt_long = &r->layer_buf[2];
+    ImgBuf *fx_chip = &r->layer_buf[3];
+    ImgBuf *bt_chip = &r->layer_buf[4];
+    ImgBuf *laser_l = &r->layer_buf[5];
+    ImgBuf *laser_r = &r->layer_buf[6];
+
+    /* Reset only the needed rows (h rows, not the full allocated buffer) */
+    bg->width = fx_long->width = bt_long->width = fx_chip->width
+              = bt_chip->width = laser_l->width  = laser_r->width  = w;
+    bg->height = fx_long->height = bt_long->height = fx_chip->height
+               = bt_chip->height = laser_l->height  = laser_r->height = h;
+    memset(bg->data,      0, (size_t)w * (size_t)h * 4);
+    memset(fx_long->data, 0, (size_t)w * (size_t)h * 4);
+    memset(bt_long->data, 0, (size_t)w * (size_t)h * 4);
+    memset(fx_chip->data, 0, (size_t)w * (size_t)h * 4);
+    memset(bt_chip->data, 0, (size_t)w * (size_t)h * 4);
+    memset(laser_l->data, 0, (size_t)w * (size_t)h * 4);
+    memset(laser_r->data, 0, (size_t)w * (size_t)h * 4);
 
     /* Background */
-    draw_background(&bg, h, top, bottom, bt, r->metrics, measure);
+    draw_background(bg, h, top, bottom, bt, r->metrics, measure);
 
     /* Button events */
     const EventIndex *idx = &r->idx;
@@ -634,7 +658,7 @@ ImgBuf renderer_render_measure(Renderer *r, int measure) {
             const ButtonEvent *ev = &idx->chips[ci_base + i];
             double frac = metrics_measure_frac(r->metrics, ev->time);
             int is_bt = is_bt_track(ev->track);
-            draw_chip(is_bt ? &bt_chip : &fx_chip, h, top, bottom, bt,
+            draw_chip(is_bt ? bt_chip : fx_chip, h, top, bottom, bt,
                       ev->track, frac, is_bt);
         }
         /* Holds */
@@ -643,7 +667,7 @@ ImgBuf renderer_render_measure(Renderer *r, int measure) {
         for (int i = 0; i < hi_cnt; i++) {
             const MeasureHoldEvent *ev = &idx->holds[hi_base + i];
             int is_bt = is_bt_track(ev->track);
-            draw_long(is_bt ? &bt_long : &fx_long, h, top, bottom, bt,
+            draw_long(is_bt ? bt_long : fx_long, h, top, bottom, bt,
                       ev->track, ev->start_frac, ev->end_frac, is_bt);
         }
         /* Lasers */
@@ -652,29 +676,26 @@ ImgBuf renderer_render_measure(Renderer *r, int measure) {
         for (int i = 0; i < li_cnt; i++) {
             const MeasureLaserSegment *seg  = &idx->lasers[li_base + i];
             const MeasureLaserSegment *next = (i + 1 < li_cnt) ? &idx->lasers[li_base + i + 1] : NULL;
-            ImgBuf *laser_buf = (seg->track == VOL_L_TRACK) ? &laser_l : &laser_r;
+            ImgBuf *laser_buf = (seg->track == VOL_L_TRACK) ? laser_l : laser_r;
             draw_laser_segment(laser_buf, h, top, bottom, seg, next);
         }
     }
 
     /* Composite layers: bg -> fx_long -> bt_long -> fx_chip -> bt_chip -> laser_l -> laser_r */
     ImgBuf composed = imgbuf_alloc(w, h);
-    imgbuf_composite(&composed, &bg);
-    imgbuf_composite(&composed, &fx_long);
-    imgbuf_composite(&composed, &bt_long);
-    imgbuf_composite(&composed, &fx_chip);
-    imgbuf_composite(&composed, &bt_chip);
-    imgbuf_composite(&composed, &laser_l);
-    imgbuf_composite(&composed, &laser_r);
+    imgbuf_composite(&composed, bg);
+    imgbuf_composite(&composed, fx_long);
+    imgbuf_composite(&composed, bt_long);
+    imgbuf_composite(&composed, fx_chip);
+    imgbuf_composite(&composed, bt_chip);
+    imgbuf_composite(&composed, laser_l);
+    imgbuf_composite(&composed, laser_r);
 
     /* Labels (drawn directly onto composed) */
     draw_measure_number(&composed, h, r->font, measure, top, bt);
     draw_bpm_labels(&composed, h, r->font, r->metrics, measure, top, bottom, bt, idx);
 
-    /* Free layer buffers */
-    imgbuf_free(&bg);     imgbuf_free(&fx_long); imgbuf_free(&bt_long);
-    imgbuf_free(&fx_chip);imgbuf_free(&bt_chip);
-    imgbuf_free(&laser_l);imgbuf_free(&laser_r);
+    /* Layer buffers are reused (not freed here) */
 
     return composed;
 }

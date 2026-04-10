@@ -1,0 +1,238 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+
+/* getopt_long */
+#ifdef _WIN32
+#  include <getopt.h>
+#else
+#  include <getopt.h>
+#endif
+
+/* Use libpng for fast, high-quality PNG output when available;
+ * fall back to stb_image_write otherwise. */
+#ifdef HAVE_LIBPNG
+#  include <png.h>
+#else
+#  define STB_IMAGE_WRITE_IMPLEMENTATION
+#  include "../vendor/stb_image_write.h"
+#endif
+
+#include "model.h"
+#include "parser.h"
+#include "metrics.h"
+#include "draw.h"
+#include "renderer.h"
+
+static void usage(const char *prog) {
+    fprintf(stderr,
+        "Usage: %s <input.vox> [output.png] [options]\n"
+        "\n"
+        "Options:\n"
+        "  --start-measure N        First measure to render (default: 1)\n"
+        "  --end-measure   N        Last measure to render (default: end of chart)\n"
+        "  --measures-per-column N  Measures per column (default: 5)\n"
+        "  --column-gap N           Horizontal gap in pixels (default: 80)\n"
+        "  --font PATH              Path to a TrueType font file\n"
+        "  --help                   Show this help\n",
+        prog);
+}
+
+/* Build output path: replace extension with .png */
+static void default_output_path(const char *input, char *out, size_t out_sz) {
+    strncpy(out, input, out_sz - 1);
+    out[out_sz - 1] = '\0';
+    /* find last '.' */
+    char *dot = strrchr(out, '.');
+    char *sep = strrchr(out, '/');
+#ifdef _WIN32
+    char *sep2 = strrchr(out, '\\');
+    if (sep2 && (!sep || sep2 > sep)) sep = sep2;
+#endif
+    if (dot && (!sep || dot > sep)) {
+        *dot = '\0';
+    }
+    strncat(out, ".png", out_sz - strlen(out) - 1);
+}
+
+/* mkdir -p for a file's parent directory (single level) */
+static void ensure_parent_dir(const char *path) {
+    char tmp[4096];
+    strncpy(tmp, path, sizeof(tmp) - 1);
+    tmp[sizeof(tmp)-1] = '\0';
+    char *last_sep = strrchr(tmp, '/');
+#ifdef _WIN32
+    char *last_sep2 = strrchr(tmp, '\\');
+    if (last_sep2 && (!last_sep || last_sep2 > last_sep)) last_sep = last_sep2;
+#endif
+    if (!last_sep) return;
+    *last_sep = '\0';
+    (void)0; /* ensure_parent_dir: mkdir -p is a no-op placeholder */
+}
+
+int main(int argc, char **argv) {
+    int start_measure = 1;
+    int end_measure   = -1; /* -1 = auto */
+    int measures_per_column = 5;
+    int column_gap = 80;
+    const char *font_path = NULL;
+
+    static struct option long_opts[] = {
+        {"start-measure",       required_argument, 0, 's'},
+        {"end-measure",         required_argument, 0, 'e'},
+        {"measures-per-column", required_argument, 0, 'm'},
+        {"column-gap",          required_argument, 0, 'g'},
+        {"font",                required_argument, 0, 'f'},
+        {"help",                no_argument,       0, 'h'},
+        {0, 0, 0, 0}
+    };
+
+    int opt, opt_idx = 0;
+    while ((opt = getopt_long(argc, argv, "s:e:m:g:f:h", long_opts, &opt_idx)) != -1) {
+        switch (opt) {
+            case 's': start_measure       = atoi(optarg); break;
+            case 'e': end_measure         = atoi(optarg); break;
+            case 'm': measures_per_column = atoi(optarg); break;
+            case 'g': column_gap          = atoi(optarg); break;
+            case 'f': font_path           = optarg;       break;
+            case 'h': usage(argv[0]); return 0;
+            default:  usage(argv[0]); return 1;
+        }
+    }
+
+    if (optind >= argc) {
+        fprintf(stderr, "Error: input .vox file required\n");
+        usage(argv[0]);
+        return 1;
+    }
+
+    const char *input_path = argv[optind];
+    char output_path[4096];
+    if (optind + 1 < argc) {
+        strncpy(output_path, argv[optind + 1], sizeof(output_path) - 1);
+        output_path[sizeof(output_path)-1] = '\0';
+    } else {
+        default_output_path(input_path, output_path, sizeof(output_path));
+    }
+
+    /* Validate arguments */
+    if (start_measure < 1) {
+        fprintf(stderr, "Error: start_measure must be >= 1\n");
+        return 1;
+    }
+    if (measures_per_column < 1) {
+        fprintf(stderr, "Error: measures_per_column must be >= 1\n");
+        return 1;
+    }
+    if (column_gap < 0) {
+        fprintf(stderr, "Error: column_gap must be >= 0\n");
+        return 1;
+    }
+
+    /* Parse chart */
+    VoxChart *chart = (VoxChart *)calloc(1, sizeof(VoxChart));
+    if (!chart) { fprintf(stderr, "Out of memory\n"); return 1; }
+
+    if (vox_parse(input_path, chart) != 0) {
+        fprintf(stderr, "Error: failed to parse '%s'\n", input_path);
+        free(chart);
+        return 1;
+    }
+
+    /* Determine end measure */
+    int last_measure = (end_measure > 0) ? end_measure : chart->end_position.measure;
+    if (last_measure < start_measure) {
+        fprintf(stderr, "Error: no measures to render (start=%d, end=%d)\n",
+                start_measure, last_measure);
+        free(chart);
+        return 1;
+    }
+
+    /* Build metrics */
+    ChartMetrics *metrics = (ChartMetrics *)calloc(1, sizeof(ChartMetrics));
+    if (!metrics) { fprintf(stderr, "Out of memory\n"); free(chart); return 1; }
+    metrics_init(metrics, chart);
+
+    /* Init font — always succeeds (falls back to built-in if no TTF found) */
+    FontCtx *font = font_init(font_path);
+    if (!font) {
+        fprintf(stderr, "Error: out of memory initializing font.\n");
+        goto cleanup;
+    }
+
+    /* Init renderer */
+    Renderer *rend = (Renderer *)calloc(1, sizeof(Renderer));
+    if (!rend) { fprintf(stderr, "Out of memory\n"); goto cleanup; }
+    renderer_init(rend, chart, metrics, font);
+
+    /* Render */
+    ImgBuf result = renderer_render_chart(rend, start_measure, last_measure,
+                                          measures_per_column, column_gap);
+
+    /* Write PNG */
+    ensure_parent_dir(output_path);
+
+#ifdef HAVE_LIBPNG
+    /* libpng path: fast, high-quality compression */
+    {
+        int ok = 0;
+        FILE *fp = fopen(output_path, "wb");
+        if (!fp) {
+            fprintf(stderr, "Error: cannot open '%s' for writing: %s\n",
+                    output_path, strerror(errno));
+            imgbuf_free(&result);
+            renderer_free(rend);
+            goto cleanup;
+        }
+        png_structp png = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+        png_infop info = png ? png_create_info_struct(png) : NULL;
+        if (png && info && !setjmp(png_jmpbuf(png))) {
+            png_init_io(png, fp);
+            png_set_IHDR(png, info,
+                         (png_uint_32)result.width, (png_uint_32)result.height,
+                         8, PNG_COLOR_TYPE_RGBA,
+                         PNG_INTERLACE_NONE,
+                         PNG_COMPRESSION_TYPE_DEFAULT,
+                         PNG_FILTER_TYPE_DEFAULT);
+            /* Level 1 is much faster than the default (6) for large images */
+            png_set_compression_level(png, 1);
+            png_write_info(png, info);
+            for (int y = 0; y < result.height; y++) {
+                png_write_row(png, result.data + y * result.width * 4);
+            }
+            png_write_end(png, NULL);
+            ok = 1;
+        }
+        if (png) png_destroy_write_struct(&png, &info);
+        fclose(fp);
+        if (!ok) {
+            fprintf(stderr, "Error: failed to write PNG to '%s'\n", output_path);
+            imgbuf_free(&result);
+            renderer_free(rend);
+            goto cleanup;
+        }
+    }
+#else
+    /* stb_image_write fallback */
+    stbi_write_png_compression_level = 1;
+    if (!stbi_write_png(output_path, result.width, result.height, 4,
+                        result.data, result.width * 4)) {
+        fprintf(stderr, "Error: failed to write PNG to '%s'\n", output_path);
+        imgbuf_free(&result);
+        renderer_free(rend);
+        goto cleanup;
+    }
+#endif
+    imgbuf_free(&result);
+
+    printf("%s\n", output_path);
+
+    renderer_free(rend);
+cleanup:
+    if (font)    font_free(font);
+    if (metrics) { metrics_free(metrics); free(metrics); }
+    free(chart);
+    free(rend);
+    return 0;
+}

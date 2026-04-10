@@ -154,10 +154,11 @@ int main(int argc, char **argv) {
     if (!metrics) { fprintf(stderr, "Out of memory\n"); free(chart); return 1; }
     metrics_init(metrics, chart);
 
-    /* Init font (optional) */
+    /* Init font — always succeeds (falls back to built-in if no TTF found) */
     FontCtx *font = font_init(font_path);
     if (!font) {
-        fprintf(stderr, "Warning: no TrueType font found; text labels will be omitted.\n");
+        fprintf(stderr, "Error: out of memory initializing font.\n");
+        goto cleanup;
     }
 
     /* Init renderer */

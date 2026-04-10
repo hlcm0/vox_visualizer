@@ -246,14 +246,21 @@ void imgbuf_composite_at(ImgBuf *dst, const ImgBuf *src, int ox, int oy) {
     }
 }
 
-/* ---- font / text (stb_truetype) ---- */
+/* ---- font / text (stb_truetype + stb_easy_font fallback) ---- */
 
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "../vendor/stb_truetype.h"
 
+#define STB_EASY_FONT_IMPLEMENTATION
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-braces"
+#pragma GCC diagnostic ignored "-Wunused-function"
+#include "../vendor/stb_easy_font.h"
+#pragma GCC diagnostic pop
+
 struct FontCtx {
     stbtt_fontinfo info;
-    unsigned char *font_data;
+    unsigned char *font_data;   /* NULL when using built-in fallback */
 };
 
 static const char *font_search_paths[] = {
@@ -301,14 +308,18 @@ FontCtx *font_init(const char *font_path) {
         }
     }
 
-    if (!buf) return NULL;
-
     FontCtx *ctx = (FontCtx *)malloc(sizeof(FontCtx));
     if (!ctx) { free(buf); return NULL; }
     ctx->font_data = buf;
-    if (!stbtt_InitFont(&ctx->info, buf, 0)) {
-        free(buf); free(ctx); return NULL;
+
+    if (buf) {
+        if (!stbtt_InitFont(&ctx->info, buf, 0)) {
+            free(buf);
+            ctx->font_data = NULL; /* fall back to built-in */
+        }
     }
+    /* If buf is NULL or InitFont failed, ctx->font_data == NULL and we use the
+     * stb_easy_font built-in fallback — always returns a usable FontCtx. */
     return ctx;
 }
 
@@ -318,9 +329,25 @@ void font_free(FontCtx *ctx) {
     free(ctx);
 }
 
+/* stb_easy_font scale factor: stb_easy_font uses a nominal cell of ~8px wide x 13px tall.
+ * We scale to approximate scale_px (target font height in pixels). */
+#define EASY_FONT_CELL_H 13.0f
+#define EASY_FONT_CELL_W  7.0f   /* approximate character advance */
+
 void font_measure(FontCtx *ctx, const char *text, float scale_px,
                   float *out_w, float *out_h) {
     if (!ctx || !text) { *out_w = 0; *out_h = 0; return; }
+
+    if (!ctx->font_data) {
+        /* stb_easy_font fallback */
+        float scale = scale_px / EASY_FONT_CELL_H;
+        *out_h = scale_px;
+        int n = 0;
+        for (const char *p = text; *p; p++) n++;
+        *out_w = (float)n * EASY_FONT_CELL_W * scale;
+        return;
+    }
+
     float scale = stbtt_ScaleForPixelHeight(&ctx->info, scale_px);
     int ascent, descent, line_gap;
     stbtt_GetFontVMetrics(&ctx->info, &ascent, &descent, &line_gap);
@@ -343,6 +370,36 @@ void font_measure(FontCtx *ctx, const char *text, float scale_px,
 void font_draw(ImgBuf *dst, FontCtx *ctx, const char *text,
                float scale_px, float x, float y, Color c) {
     if (!ctx || !text) return;
+
+    if (!ctx->font_data) {
+        /* stb_easy_font fallback: rasterize quads and fill pixels */
+        float scale = scale_px / EASY_FONT_CELL_H;
+        /* stb_easy_font outputs quads: 4 * 64 bytes per char max */
+        int max_chars = 256;
+        char *vbuf = (char *)malloc((size_t)(max_chars * 270));
+        if (!vbuf) return;
+        int nquads = stb_easy_font_print(0.0f, 0.0f, (char *)text, NULL, vbuf,
+                                         max_chars * 270);
+        /* Each quad: 4 vertices * (x:float, y:float, z:float, color:4bytes) */
+        for (int q = 0; q < nquads; q++) {
+            float *v0 = (float *)(vbuf + q * 64 +  0);
+            float *v2 = (float *)(vbuf + q * 64 + 32);
+            int px0 = (int)(x + v0[0] * scale);
+            int py0 = (int)(y + v0[1] * scale);
+            int px1 = (int)(x + v2[0] * scale + 0.9f);
+            int py1 = (int)(y + v2[1] * scale + 0.9f);
+            for (int fy = py0; fy <= py1; fy++) {
+                if (fy < 0 || fy >= dst->height) continue;
+                for (int fx = px0; fx <= px1; fx++) {
+                    if (fx < 0 || fx >= dst->width) continue;
+                    blend_at(dst->data + (fy * dst->width + fx) * 4, c);
+                }
+            }
+        }
+        free(vbuf);
+        return;
+    }
+
     float scale = stbtt_ScaleForPixelHeight(&ctx->info, scale_px);
     int ascent, descent;
     stbtt_GetFontVMetrics(&ctx->info, &ascent, &descent, NULL);
